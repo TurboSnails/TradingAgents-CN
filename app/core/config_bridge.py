@@ -12,6 +12,65 @@ from typing import Optional
 logger = logging.getLogger("app.config_bridge")
 
 
+def _env_is_placeholder(val: Optional[str]) -> bool:
+    if val is None:
+        return True
+    s = str(val).strip()
+    if not s:
+        return True
+    low = s.lower()
+    return low.startswith("your_") or low.startswith("your-")
+
+
+def _apply_minimax_openai_aliases() -> None:
+    """
+    MiniMax 仅提供 OpenAI 兼容 API（见官方文档 Compatible OpenAI API）。
+    核心库与 trading_graph 的 custom_openai 分支读取 CUSTOM_OPENAI_*，
+    此处允许用户单独配置 MINIMAX_*，自动回填到 CUSTOM_OPENAI_*。
+    """
+    try:
+        from app.utils.api_key_utils import normalize_secret_from_env
+    except ImportError:
+        normalize_secret_from_env = lambda v: (v or "").strip() if v else None
+
+    minimax_key = normalize_secret_from_env(os.getenv("MINIMAX_API_KEY")) or ""
+    minimax_base = (os.getenv("MINIMAX_BASE_URL") or "").strip()
+    custom_key = normalize_secret_from_env(os.getenv("CUSTOM_OPENAI_API_KEY"))
+    custom_base = (os.getenv("CUSTOM_OPENAI_BASE_URL") or "").strip()
+    try:
+        from app.utils.api_key_utils import infer_default_minimax_openai_base_url
+
+        default_mm_base = infer_default_minimax_openai_base_url()
+    except ImportError:
+        default_mm_base = "https://api.minimax.io/v1"
+
+    if minimax_key and not _env_is_placeholder(minimax_key):
+        try:
+            from app.utils.api_key_utils import is_valid_api_key as _valid_key
+        except ImportError:
+
+            def _valid_key(s):
+                return bool(s and len(str(s).strip()) > 10)
+
+        # CUSTOM 为占位、无效、或误填 JWT（ey 开头）时，用 MINIMAX 回填
+        _ck = (custom_key or "").strip()
+        if (
+            _env_is_placeholder(custom_key)
+            or not _valid_key(_ck)
+            or _ck.lstrip().startswith("ey")
+        ):
+            os.environ["CUSTOM_OPENAI_API_KEY"] = minimax_key
+            logger.info("  ✓ MINIMAX_API_KEY → CUSTOM_OPENAI_API_KEY（OpenAI 兼容别名）")
+
+    if minimax_base and not _env_is_placeholder(minimax_base):
+        if _env_is_placeholder(custom_base):
+            os.environ["CUSTOM_OPENAI_BASE_URL"] = minimax_base.rstrip("/")
+            logger.info("  ✓ MINIMAX_BASE_URL → CUSTOM_OPENAI_BASE_URL（OpenAI 兼容别名）")
+    elif minimax_key and not _env_is_placeholder(minimax_key) and _env_is_placeholder(custom_base):
+        os.environ["CUSTOM_OPENAI_BASE_URL"] = default_mm_base
+        logger.info(f"  ✓ 已设置 CUSTOM_OPENAI_BASE_URL={default_mm_base}（MiniMax 官方默认，未显式配置 MINIMAX_BASE_URL）")
+
+
 def bridge_config_to_env():
     """
     将统一配置桥接到环境变量
@@ -31,6 +90,8 @@ def bridge_config_to_env():
 
         logger.info("🔧 开始桥接配置到环境变量...")
         bridged_count = 0
+
+        _apply_minimax_openai_aliases()
 
         # 强制启用 MongoDB 存储（用于 Token 使用统计）
         # 从 .env 文件读取配置，如果未设置则默认启用
@@ -81,11 +142,11 @@ def bridge_config_to_env():
                 env_key = f"{provider.name.upper()}_API_KEY"
                 existing_env_value = os.getenv(env_key)
 
-                # 检查环境变量是否已存在且有效（不是占位符）
-                if existing_env_value and not existing_env_value.startswith("your_"):
+                # 检查环境变量是否已存在且有效（不是占位符；含 your-custom-openai-api-key 等）
+                if existing_env_value and not _env_is_placeholder(existing_env_value):
                     logger.info(f"  ✓ 使用 .env 文件中的 {env_key} (长度: {len(existing_env_value)})")
                     bridged_count += 1
-                elif provider.api_key and not provider.api_key.startswith("your_"):
+                elif provider.api_key and not _env_is_placeholder(provider.api_key):
                     # 只有当环境变量不存在或为占位符时，才使用数据库配置
                     os.environ[env_key] = provider.api_key
                     logger.info(f"  ✓ 使用数据库厂家配置的 {env_key} (长度: {len(provider.api_key)})")
@@ -108,12 +169,12 @@ def bridge_config_to_env():
                 existing_env_value = os.getenv(env_key)
 
                 # 检查环境变量是否已存在且有效（不是占位符）
-                if existing_env_value and not existing_env_value.startswith("your_"):
+                if existing_env_value and not _env_is_placeholder(existing_env_value):
                     logger.info(f"  ✓ 使用 .env 文件中的 {env_key} (长度: {len(existing_env_value)})")
                     bridged_count += 1
                 elif llm_config.enabled and llm_config.api_key:
                     # 只有当环境变量不存在或为占位符时，才使用数据库配置
-                    if not llm_config.api_key.startswith("your_"):
+                    if not _env_is_placeholder(llm_config.api_key):
                         os.environ[env_key] = llm_config.api_key
                         logger.info(f"  ✓ 使用 JSON 文件中的 {env_key} (长度: {len(llm_config.api_key)})")
                         bridged_count += 1

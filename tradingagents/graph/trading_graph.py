@@ -38,6 +38,125 @@ from .reflection import Reflector
 from .signal_processing import SignalProcessor
 
 
+def _mask_api_key_hint(key: str) -> str:
+    """日志用：长度 + 首尾片段，不输出完整密钥。"""
+    s = (key or "").strip()
+    if not s:
+        return "(empty)"
+    n = len(s)
+    if n <= 14:
+        return f"len={n} prefix={s[:4]}…"
+    return f"len={n} {s[:6]}…{s[-4:]}"
+
+
+def _resolve_custom_openai_api_key(
+    config: Optional[dict] = None,
+    explicit: Optional[str] = None,
+) -> Optional[str]:
+    """
+    custom_openai / MiniMax：与 simple_analysis_service 一致，环境变量 MINIMAX_* / CUSTOM_OPENAI_*
+    优先于 Mongo「快速/深度」里保存的密钥，避免 UI 残留错误 key 覆盖 .env 导致 401。
+    """
+    try:
+        from app.utils.api_key_utils import is_valid_api_key
+    except ImportError:
+
+        def is_valid_api_key(k: Optional[str]) -> bool:
+            if not k:
+                return False
+            s = str(k).strip()
+            if len(s) <= 10:
+                return False
+            if s.startswith(("your_", "your-")):
+                return False
+            if "..." in s:
+                return False
+            return True
+
+    try:
+        from app.utils.api_key_utils import normalize_secret_from_env as _norm_env_secret
+    except ImportError:
+
+        def _norm_env_secret(x):
+            return (x or "").strip() if x else None
+
+    for label, raw in (
+        ("MINIMAX_API_KEY", _norm_env_secret(os.getenv("MINIMAX_API_KEY"))),
+        ("CUSTOM_OPENAI_API_KEY", _norm_env_secret(os.getenv("CUSTOM_OPENAI_API_KEY"))),
+    ):
+        if not raw:
+            continue
+        rs = raw.strip()
+        if rs.lstrip().startswith("ey"):
+            logger.info(
+                "🔑 [custom_openai] 跳过 env=%s（ey 开头疑似 JWT，非 OpenAI 兼容 Secret Key）",
+                label,
+            )
+            continue
+        if is_valid_api_key(rs):
+            logger.info(
+                "🔑 [custom_openai] 选用来源=%s %s",
+                label,
+                _mask_api_key_hint(rs),
+            )
+            return rs
+        logger.info(
+            "🔑 [custom_openai] 跳过 env=%s（未通过校验） %s",
+            label,
+            _mask_api_key_hint(rs),
+        )
+
+    if explicit is not None:
+        es = str(explicit).strip()
+        if es.lstrip().startswith("ey"):
+            logger.info(
+                "🔑 [custom_openai] 跳过 explicit（ey 开头疑似 JWT） %s",
+                _mask_api_key_hint(es),
+            )
+        elif is_valid_api_key(es):
+            logger.info(
+                "🔑 [custom_openai] 选用来源=explicit(混合模式参数) %s",
+                _mask_api_key_hint(es),
+            )
+            return es
+        elif es:
+            logger.info(
+                "🔑 [custom_openai] 跳过 explicit（未通过校验） %s",
+                _mask_api_key_hint(es),
+            )
+
+    if config:
+        for label, k in (
+            ("quick_api_key", config.get("quick_api_key")),
+            ("deep_api_key", config.get("deep_api_key")),
+        ):
+            if not k:
+                continue
+            ks = str(k).strip()
+            if ks.lstrip().startswith("ey"):
+                logger.info(
+                    "🔑 [custom_openai] 跳过 config.%s（ey 开头疑似 JWT） %s",
+                    label,
+                    _mask_api_key_hint(ks),
+                )
+                continue
+            if is_valid_api_key(ks):
+                logger.info(
+                    "🔑 [custom_openai] 选用来源=config.%s %s",
+                    label,
+                    _mask_api_key_hint(ks),
+                )
+                return ks
+            logger.info(
+                "🔑 [custom_openai] 跳过 config.%s（未通过校验） %s",
+                label,
+                _mask_api_key_hint(ks),
+            )
+
+    logger.warning("🔑 [custom_openai] 未解析到任何有效 API Key（env / explicit / config 均无）")
+    return None
+
+
 def create_llm_by_provider(provider: str, model: str, backend_url: str, temperature: float, max_tokens: int, timeout: int, api_key: str = None):
     """
     根据 provider 创建对应的 LLM 实例
@@ -149,10 +268,28 @@ def create_llm_by_provider(provider: str, model: str, backend_url: str, temperat
             timeout=timeout
         )
 
-    elif provider.lower() in ["qianfan", "custom_openai"]:
+    elif provider.lower() == "qianfan":
         return create_openai_compatible_llm(
             provider=provider,
             model=model,
+            base_url=backend_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout
+        )
+
+    elif provider.lower() == "custom_openai":
+        # 环境 MINIMAX/CUSTOM_OPENAI 优先于调用方传入的数据库密钥（避免错误 quick_api_key 覆盖 .env）
+        merged_key = _resolve_custom_openai_api_key(config=None, explicit=api_key)
+        if not merged_key:
+            raise ValueError(
+                "custom_openai 未配置有效 API Key：请设置 MINIMAX_API_KEY 或 CUSTOM_OPENAI_API_KEY，"
+                "或在混合模式传入有效密钥"
+            )
+        return create_openai_compatible_llm(
+            provider="custom_openai",
+            model=model,
+            api_key=merged_key,
             base_url=backend_url,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -208,6 +345,18 @@ class TradingAgentsGraph:
         """
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
+
+        # MiniMax 官方模型名但 DB 里 provider 未纠成 custom_openai 时，会走错分支（如 openai + 占位 OPENAI_API_KEY → 2049）
+        _qm = self.config.get("quick_think_llm") or ""
+        if isinstance(_qm, str) and _qm.startswith("MiniMax-"):
+            _lp = str(self.config.get("llm_provider") or "").lower()
+            if _lp != "custom_openai":
+                logger.warning(
+                    "⚠️ 快速模型为 %s 但 llm_provider=%s，已强制改为 custom_openai",
+                    _qm,
+                    self.config.get("llm_provider"),
+                )
+                self.config["llm_provider"] = "custom_openai"
 
         # Update the interface's config
         set_config(self.config)
@@ -546,14 +695,44 @@ class TradingAgentsGraph:
 
             logger.info(f"✅ [DeepSeek] 已启用token统计功能并应用用户配置的模型参数")
         elif self.config["llm_provider"].lower() == "custom_openai":
-            # 自定义OpenAI端点配置
+            # 自定义OpenAI端点配置（MiniMax / 聚合渠道等）：密钥与 URL 与 WebAPI create_analysis_config 一致
             from tradingagents.llm_adapters.openai_compatible_base import create_openai_compatible_llm
 
-            custom_api_key = os.getenv('CUSTOM_OPENAI_API_KEY')
+            custom_api_key = _resolve_custom_openai_api_key(self.config)
             if not custom_api_key:
-                raise ValueError("使用自定义OpenAI端点需要设置CUSTOM_OPENAI_API_KEY环境变量")
+                raise ValueError(
+                    "使用自定义 OpenAI 兼容端点需要在「大模型配置」中填写密钥，或设置环境变量 "
+                    "MINIMAX_API_KEY / CUSTOM_OPENAI_API_KEY"
+                )
 
-            custom_base_url = self.config.get("custom_openai_base_url", "https://api.openai.com/v1")
+            try:
+                from app.utils.api_key_utils import infer_default_minimax_openai_base_url
+
+                _mm_fallback = infer_default_minimax_openai_base_url()
+            except ImportError:
+                _mm_fallback = "https://api.minimax.io/v1"
+            custom_base_url = (
+                self.config.get("custom_openai_base_url")
+                or self.config.get("backend_url")
+                or os.getenv("CUSTOM_OPENAI_BASE_URL")
+                or os.getenv("MINIMAX_BASE_URL")
+                or _mm_fallback
+            )
+            custom_base_url = str(custom_base_url).rstrip("/")
+
+            _qm = str(self.config.get("quick_think_llm") or "")
+            _ck = (custom_api_key or "").strip()
+            if (
+                _ck.startswith("sk-cp-")
+                and _qm.startswith("MiniMax-")
+                and "api.minimax.io" in custom_base_url.lower()
+                and "minimaxi.com" not in custom_base_url.lower()
+            ):
+                logger.warning(
+                    "⚠️ [自定义OpenAI] sk-cp- 密钥应对中国区网关 api.minimaxi.com（DeerFlow 同款），"
+                    "当前为 api.minimax.io，已自动纠正以免 2049"
+                )
+                custom_base_url = "https://api.minimaxi.com/v1"
 
             # 🔧 从配置中读取模型参数（优先使用用户配置，否则使用默认值）
             quick_config = self.config.get("quick_model_config", {})
@@ -568,14 +747,19 @@ class TradingAgentsGraph:
             deep_timeout = deep_config.get("timeout", 180)
 
             logger.info(f"🔧 [自定义OpenAI] 使用端点: {custom_base_url}")
+            logger.info(
+                "🔑 [自定义OpenAI] API Key 解析: 优先 MINIMAX_API_KEY / CUSTOM_OPENAI_API_KEY，"
+                "其次数据库 quick/deep（避免 DB 残留错误 key 覆盖 .env）"
+            )
             logger.info(f"🔧 [自定义OpenAI-快速模型] max_tokens={quick_max_tokens}, temperature={quick_temperature}, timeout={quick_timeout}s")
             logger.info(f"🔧 [自定义OpenAI-深度模型] max_tokens={deep_max_tokens}, temperature={deep_temperature}, timeout={deep_timeout}s")
 
-            # 使用OpenAI兼容适配器创建LLM实例
+            # 使用OpenAI兼容适配器创建LLM实例（显式传入 api_key，避免仅依赖进程内 env）
             self.deep_thinking_llm = create_openai_compatible_llm(
                 provider="custom_openai",
                 model=self.config["deep_think_llm"],
                 base_url=custom_base_url,
+                api_key=custom_api_key,
                 temperature=deep_temperature,
                 max_tokens=deep_max_tokens,
                 timeout=deep_timeout
@@ -584,6 +768,7 @@ class TradingAgentsGraph:
                 provider="custom_openai",
                 model=self.config["quick_think_llm"],
                 base_url=custom_base_url,
+                api_key=custom_api_key,
                 temperature=quick_temperature,
                 max_tokens=quick_max_tokens,
                 timeout=quick_timeout

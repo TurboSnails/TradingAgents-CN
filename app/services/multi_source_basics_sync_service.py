@@ -64,14 +64,36 @@ class MultiSourceBasicsSyncService:
         self._last_status: Optional[Dict[str, Any]] = None
 
     async def get_status(self) -> Dict[str, Any]:
-        """获取同步状态"""
+        """获取同步状态（轻量查询，避免长时间占用连接导致前端 60s 超时）"""
         if self._last_status:
             return self._last_status
 
         db = get_mongo_db()
-        doc = await db[STATUS_COLLECTION].find_one({"job": JOB_KEY})
+        try:
+            # max_time_ms：服务端查询上限；wait_for：防止池耗尽时无限等待
+            doc = await asyncio.wait_for(
+                db[STATUS_COLLECTION].find_one(
+                    {"job": JOB_KEY},
+                    max_time_ms=8000,
+                ),
+                timeout=12.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("get_status: MongoDB 查询超时，返回降级状态")
+            return {
+                "job": JOB_KEY,
+                "status": "unknown",
+                "message": "暂时无法读取同步状态（数据库响应超时），请稍后重试",
+            }
+        except Exception as e:
+            logger.warning("get_status: 读取失败 %s", e)
+            return {
+                "job": JOB_KEY,
+                "status": "unknown",
+                "message": f"读取同步状态失败: {e!s}",
+            }
+
         if doc:
-            # 移除MongoDB的_id字段以避免序列化问题
             doc.pop("_id", None)
             return doc
         return {"job": JOB_KEY, "status": "never_run"}

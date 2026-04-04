@@ -25,6 +25,10 @@ from app.utils.timezone import now_tz
 from app.services.operation_log_service import log_operation
 from app.models.operation_log import ActionType
 from app.services.config_provider import provider as config_provider
+from app.core.llm_catalog_bootstrap import (
+    env_has_custom_openai_compatible_key,
+    build_synthetic_minimax_llm_configs,
+)
 
 
 
@@ -948,12 +952,31 @@ async def get_llm_configs(
         # 获取所有供应商信息，用于过滤被禁用供应商的模型
         providers = await config_service.get_llm_providers()
         active_provider_names = {p.name for p in providers if p.is_active}
+        # 环境变量已配 CUSTOM_OPENAI / MINIMAX 时，视为 custom_openai 可用（不依赖 Mongo 是否种子）
+        if env_has_custom_openai_compatible_key():
+            active_provider_names.add("custom_openai")
 
-        # 过滤：只返回启用的模型 且 供应商也启用的模型
+        def _prov_str(p) -> str:
+            if p is None:
+                return ""
+            if hasattr(p, "value"):
+                return str(p.value)
+            return str(p)
+
+        # 过滤：只返回启用的模型 且 供应商也启用的模型（provider 可能是 Enum / 字符串混存）
         filtered_configs = [
             llm_config for llm_config in config.llm_configs
-            if llm_config.enabled and llm_config.provider in active_provider_names
+            if llm_config.enabled and _prov_str(llm_config.provider) in active_provider_names
         ]
+
+        # Mongo 未写入 MiniMax 条目时，仍从环境变量注入可选模型（与 llm_catalog_bootstrap 列表一致）
+        if env_has_custom_openai_compatible_key():
+            existing_keys = {(_prov_str(c.provider), c.model_name) for c in filtered_configs}
+            for synth in build_synthetic_minimax_llm_configs():
+                k = (_prov_str(synth.provider), synth.model_name)
+                if k not in existing_keys:
+                    filtered_configs.append(synth)
+                    existing_keys.add(k)
 
         logger.info(f"✅ 过滤后的大模型配置数量: {len(filtered_configs)} (原始: {len(config.llm_configs)})")
 

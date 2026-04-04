@@ -22,7 +22,12 @@ init_logging()
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
-from app.services.simple_analysis_service import create_analysis_config, get_provider_by_model_name
+from app.services.simple_analysis_service import (
+    create_analysis_config,
+    get_provider_by_model_name,
+    get_provider_by_model_name_sync,
+    get_provider_and_url_by_model_sync,
+)
 from app.models.analysis import (
     AnalysisParameters, AnalysisResult, AnalysisTask, AnalysisBatch,
     AnalysisStatus, BatchStatus, SingleAnalysisRequest, BatchAnalysisRequest
@@ -41,6 +46,24 @@ from app.models.config import UsageRecord
 
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _apply_dual_provider_config_for_graph(
+    config: dict,
+    quick_model: str,
+    deep_model: str,
+) -> None:
+    """
+    与 simple_analysis_service 一致：补齐 quick_provider / deep_provider / *_backend_url。
+    队列任务若缺此项，混合厂家时图初始化会错；且 backend_url 须与 MiniMax 网关一致。
+    """
+    qi = get_provider_and_url_by_model_sync(quick_model)
+    di = get_provider_and_url_by_model_sync(deep_model)
+    config["quick_provider"] = qi["provider"]
+    config["deep_provider"] = di["provider"]
+    config["quick_backend_url"] = qi["backend_url"]
+    config["deep_backend_url"] = di["backend_url"]
+    config["backend_url"] = qi["backend_url"]
 
 
 class AnalysisService:
@@ -167,14 +190,14 @@ class AnalysisService:
             # 成本估算
             progress_tracker.update_progress("💰 预估分析成本")
 
-            # 根据模型名称动态查找供应商（同步版本）
-            llm_provider = "dashscope"  # 默认使用dashscope
+            # 根据模型名称动态查找供应商（与所选模型一致，禁止写死 dashscope）
+            llm_provider = get_provider_by_model_name_sync(quick_model)
+            logger.info(f"🔧 [分析任务] 模型 {quick_model} → llm_provider={llm_provider}")
 
             # 参数配置
             progress_tracker.update_progress("⚙️ 配置分析参数")
 
             # 使用标准配置函数创建完整配置
-            from app.services.simple_analysis_service import create_analysis_config
             config = create_analysis_config(
                 research_depth=task.parameters.research_depth,
                 selected_analysts=task.parameters.selected_analysts or ["market", "fundamentals"],
@@ -185,6 +208,7 @@ class AnalysisService:
                 quick_model_config=quick_model_config,  # 传递模型配置
                 deep_model_config=deep_model_config     # 传递模型配置
             )
+            _apply_dual_provider_config_for_graph(config, quick_model, deep_model)
 
             # 启动引擎
             progress_tracker.update_progress("🚀 初始化AI分析引擎")
@@ -292,11 +316,10 @@ class AnalysisService:
             except Exception as e:
                 logger.warning(f"⚠️ 从 MongoDB 读取模型配置失败: {e}，将使用默认参数")
 
-            # 根据模型名称动态查找供应商（同步版本）
-            llm_provider = "dashscope"  # 默认使用dashscope
+            llm_provider = get_provider_by_model_name_sync(quick_model)
+            logger.info(f"🔧 [分析任务] 模型 {quick_model} → llm_provider={llm_provider}")
 
             # 使用标准配置函数创建完整配置
-            from app.services.simple_analysis_service import create_analysis_config
             config = create_analysis_config(
                 research_depth=task.parameters.research_depth,
                 selected_analysts=task.parameters.selected_analysts or ["market", "fundamentals"],
@@ -307,6 +330,7 @@ class AnalysisService:
                 quick_model_config=quick_model_config,  # 传递模型配置
                 deep_model_config=deep_model_config     # 传递模型配置
             )
+            _apply_dual_provider_config_for_graph(config, quick_model, deep_model)
 
             # 获取TradingAgents实例
             trading_graph = self._get_trading_graph(config)
@@ -672,6 +696,7 @@ class AnalysisService:
                 quick_model_config=quick_model_config,  # 传递模型配置
                 deep_model_config=deep_model_config     # 传递模型配置
             )
+            _apply_dual_provider_config_for_graph(config, quick_model, deep_model)
             
             if progress_callback:
                 progress_callback(30, "创建分析图...")

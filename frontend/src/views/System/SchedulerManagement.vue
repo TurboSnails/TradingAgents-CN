@@ -314,7 +314,7 @@
             <el-table-column prop="timestamp" label="执行时长" width="180">
               <template #default="{ row }">
                 <span v-if="row.execution_time !== undefined && row.execution_time !== null">
-                  {{ row.execution_time.toFixed(2) }}秒
+                  {{ toFixedSafe(row.execution_time, 2) }}秒
                 </span>
                 <span v-else-if="row.status === 'running' && row.timestamp">
                   {{ calculateRunningTime(row.updated_at || row.timestamp) }}
@@ -442,7 +442,7 @@
             <el-table-column prop="execution_time" label="执行时长" width="180">
               <template #default="{ row }">
                 <span v-if="row.execution_time !== undefined && row.execution_time !== null">
-                  {{ row.execution_time.toFixed(2) }}秒
+                  {{ toFixedSafe(row.execution_time, 2) }}秒
                 </span>
                 <span v-else-if="row.status === 'running' && row.timestamp">
                   {{ calculateRunningTime(row.updated_at || row.timestamp) }}
@@ -556,7 +556,7 @@
           {{ formatDateTime(currentExecution.updated_at || currentExecution.timestamp) }}
         </el-descriptions-item>
         <el-descriptions-item label="执行时长" v-if="currentExecution.execution_time !== undefined">
-          {{ currentExecution.execution_time.toFixed(2) }}秒
+          {{ toFixedSafe(currentExecution.execution_time, 2) }}秒
         </el-descriptions-item>
         <el-descriptions-item label="错误信息" v-if="currentExecution.error_message">
           <el-text type="danger">{{ currentExecution.error_message }}</el-text>
@@ -607,6 +607,7 @@ import {
   type SchedulerStats
 } from '@/api/scheduler'
 import { formatDateTime, formatRelativeTime } from '@/utils/datetime'
+import { toFixedSafe } from '@/utils/formatNumber'
 
 // 数据
 const loading = ref(false)

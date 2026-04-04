@@ -2859,7 +2859,8 @@ class ConfigService:
             "302ai": "AI302_API_KEY",
             "oneapi": "ONEAPI_API_KEY",
             "newapi": "NEWAPI_API_KEY",
-            "custom_aggregator": "CUSTOM_AGGREGATOR_API_KEY"
+            "custom_aggregator": "CUSTOM_AGGREGATOR_API_KEY",
+            "custom_openai": "CUSTOM_OPENAI_API_KEY",
         }
 
         env_var = env_key_mapping.get(provider_name)
@@ -2868,6 +2869,12 @@ class ConfigService:
             # 使用统一的验证方法
             if self._is_valid_api_key(api_key):
                 return api_key
+
+        # custom_openai：MINIMAX_API_KEY 与 CUSTOM_OPENAI_API_KEY 等价（未走 config_bridge 时仍可读）
+        if provider_name == "custom_openai":
+            mk = os.getenv("MINIMAX_API_KEY")
+            if self._is_valid_api_key(mk):
+                return mk.strip()
 
         return None
 

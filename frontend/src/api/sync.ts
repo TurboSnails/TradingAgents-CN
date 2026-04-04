@@ -97,7 +97,8 @@ export const getCurrentDataSource = (): Promise<ApiResponse<{
  * 获取同步状态
  */
 export const getSyncStatus = (): Promise<ApiResponse<SyncStatus>> => {
-  return ApiClient.get('/api/sync/multi-source/status')
+  // 第二参为 query params；timeout 必须放在第三参 config（见 ApiClient.get 签名）
+  return ApiClient.get('/api/sync/multi-source/status', undefined, { timeout: 120000 })
 }
 
 /**

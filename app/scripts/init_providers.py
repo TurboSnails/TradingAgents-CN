@@ -104,7 +104,17 @@ async def init_providers():
             "default_base_url": "https://api.302.ai/v1",
             "is_active": True,
             "supported_features": ["chat", "completion", "embedding", "image", "vision", "function_calling", "streaming"]
-        }
+        },
+        {
+            "name": "custom_openai",
+            "display_name": "自定义 OpenAI（MiniMax 等）",
+            "description": "任意 OpenAI 兼容接口（如 MiniMax）。密钥见 CUSTOM_OPENAI_API_KEY / CUSTOM_OPENAI_BASE_URL。",
+            "website": "https://platform.minimax.io/",
+            "api_doc_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+            "default_base_url": "https://api.minimax.io/v1",
+            "is_active": True,
+            "supported_features": ["chat", "completion", "function_calling", "streaming"]
+        },
     ]
     
     # 清除现有数据

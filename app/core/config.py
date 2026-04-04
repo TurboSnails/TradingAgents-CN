@@ -109,7 +109,12 @@ class Settings(BaseSettings):
     HTTP_PROXY: str = Field(default="")
     HTTPS_PROXY: str = Field(default="")
     NO_PROXY: str = Field(
-        default="localhost,127.0.0.1,eastmoney.com,push2.eastmoney.com,82.push2.eastmoney.com,82.push2delay.eastmoney.com,gtimg.cn,sinaimg.cn,api.tushare.pro,baostock.com"
+        default=(
+            "localhost,127.0.0.1,eastmoney.com,push2.eastmoney.com,82.push2.eastmoney.com,"
+            "82.push2delay.eastmoney.com,gtimg.cn,sinaimg.cn,api.tushare.pro,baostock.com,"
+            "api.minimax.io,minimax.io,api.minimaxi.com,minimaxi.com"
+        ),
+        description="须包含 MiniMax 国际/中国区域名；否则 HTTPS_PROXY 下 OpenAI 兼容请求走代理易 401/2049",
     )
 
     # 文件上传配置
@@ -293,7 +298,19 @@ if settings.HTTP_PROXY:
 if settings.HTTPS_PROXY:
     os.environ['HTTPS_PROXY'] = settings.HTTPS_PROXY
 if settings.NO_PROXY:
-    os.environ['NO_PROXY'] = settings.NO_PROXY
+    os.environ["NO_PROXY"] = settings.NO_PROXY
+
+# OpenAI SDK / httpx 会读 NO_PROXY；漏写 MiniMax 国际/中国区域时 HTTPS_PROXY 下易 401/2049
+_np = os.environ.get("NO_PROXY", "")
+_npl = _np.replace(" ", "").lower()
+_mm_parts = []
+if "api.minimax.io" not in _npl:
+    _mm_parts.extend(["api.minimax.io", "minimax.io"])
+if "api.minimaxi.com" not in _npl:
+    _mm_parts.extend(["api.minimaxi.com", "minimaxi.com"])
+if _mm_parts:
+    _mm = ",".join(_mm_parts)
+    os.environ["NO_PROXY"] = f"{_np.rstrip(',')},{_mm}" if _np.strip() else _mm
 
 
 def get_settings() -> Settings:

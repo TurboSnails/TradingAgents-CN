@@ -87,8 +87,17 @@ class OpenAICompatibleBase(ChatOpenAI):
                         return False
                     return True
 
-            # 从环境变量读取 API Key
-            env_api_key = os.getenv(api_key_env_var)
+            # 从环境变量读取 API Key（custom_openai 另认 MINIMAX_API_KEY，与 simple_analysis / trading_graph 一致）
+            try:
+                from app.utils.api_key_utils import normalize_secret_from_env as _norm_secret
+            except ImportError:
+
+                def _norm_secret(v):
+                    return (v or "").strip() if v else None
+
+            env_api_key = _norm_secret(os.getenv(api_key_env_var))
+            if not env_api_key and api_key_env_var == "CUSTOM_OPENAI_API_KEY":
+                env_api_key = _norm_secret(os.getenv("MINIMAX_API_KEY"))
             logger.info(f"🔍 [{provider_name}初始化] 从环境变量读取 {api_key_env_var}: {'有值' if env_api_key else '空'}")
 
             # 验证环境变量中的 API Key 是否有效（排除占位符）
@@ -110,6 +119,15 @@ class OpenAICompatibleBase(ChatOpenAI):
                 )
         else:
             logger.info(f"✅ [{provider_name}初始化] 使用传入的 API Key（来自数据库配置），长度: {len(api_key)}")
+            try:
+                from app.utils.api_key_utils import normalize_secret_from_env as _norm_sk
+
+                _nk = _norm_sk(api_key)
+                if _nk and _nk != api_key:
+                    api_key = _nk
+                    logger.info(f"✅ [{provider_name}初始化] 已对传入密钥做规范化（去 BOM/零宽/引号）")
+            except ImportError:
+                pass
         
         # 设置OpenAI兼容参数
         # 注意：model参数会被Pydantic映射到model_name字段
@@ -127,14 +145,73 @@ class OpenAICompatibleBase(ChatOpenAI):
                 "api_key": api_key,
                 "base_url": base_url
             })
-        except:
+        except Exception:
             # 旧版本LangChain
             openai_kwargs.update({
                 "openai_api_key": api_key,
                 "openai_api_base": base_url
             })
-        
-        # 初始化父类
+
+        # MiniMax 国际 / 中国区官方域：httpx trust_env=True 会走代理，易 401/2049。
+        _bu = (base_url or "").lower()
+        if "minimax.io" in _bu or "minimaxi.com" in _bu:
+            try:
+                import httpx
+
+                _to = kwargs.get("timeout")
+                if _to is None:
+                    _to = 180.0
+                elif isinstance(_to, (int, float)):
+                    _to = float(_to)
+                else:
+                    _to = 180.0
+                _httpx_timeout = httpx.Timeout(_to, connect=30.0)
+                # 部分控制台账号在 OpenAI 兼容路径下需携带 GroupId；DeerClaw 等客户端可能自动带，缺了会 401/2049。
+                _gid = (os.getenv("MINIMAX_GROUP_ID") or os.getenv("MINIMAX_GROUPID") or "").strip()
+                _mm_headers = {}
+                if _gid:
+                    _mm_headers["GroupId"] = _gid
+                    logger.info(
+                        "[%s] MiniMax：已设置请求头 GroupId（长度 %s）",
+                        provider_name,
+                        len(_gid),
+                    )
+                else:
+                    logger.debug(
+                        "[%s] MiniMax：未设置 MINIMAX_GROUP_ID（若 2049 且密钥确认无误，可尝试在控制台复制 GroupId 配置该变量）",
+                        provider_name,
+                    )
+                openai_kwargs["http_client"] = httpx.Client(
+                    trust_env=False, timeout=_httpx_timeout, headers=_mm_headers or None
+                )
+                openai_kwargs["http_async_client"] = httpx.AsyncClient(
+                    trust_env=False, timeout=_httpx_timeout, headers=_mm_headers or None
+                )
+                if _mm_headers:
+                    # OpenAI SDK / LangChain 部分路径单独建连，双保险
+                    _dh = dict(openai_kwargs.get("default_headers") or {})
+                    _dh.update(_mm_headers)
+                    openai_kwargs["default_headers"] = _dh
+                logger.info(
+                    "✅ [%s] MiniMax 端点：已启用 httpx trust_env=False（忽略系统/容器代理，避免 401/2049）",
+                    provider_name,
+                )
+            except Exception as _e:
+                logger.warning(
+                    "⚠️ [%s] MiniMax httpx trust_env=False 客户端创建失败，回退默认: %s",
+                    provider_name,
+                    _e,
+                )
+        # 仅 custom_openai：LangChain/部分子路径会读 os.environ["OPENAI_API_KEY"]。
+        # 容器内 .env 常有占位 OPENAI_API_KEY；若与 CUSTOM_OPENAI/MINIMAX 密钥不一致，请求仍带错 key → MiniMax 2049 等。
+        if provider_name == "custom_openai":
+            os.environ["OPENAI_API_KEY"] = api_key
+            logger.info(
+                "[%s] 已同步 OPENAI_API_KEY 与当前兼容端点密钥（长度 %s）；同进程若还要调 OpenAI 官方需自行权衡环境变量",
+                provider_name,
+                len(api_key),
+            )
+
         super().__init__(**openai_kwargs)
 
         # 再次确保元信息存在（有些实现会在super()中重置__dict__）

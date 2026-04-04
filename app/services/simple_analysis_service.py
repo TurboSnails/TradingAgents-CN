@@ -7,7 +7,7 @@ import asyncio
 import uuid
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
 import sys
 
@@ -50,6 +50,100 @@ logger = logging.getLogger("app.services.simple_analysis_service")
 config_service = ConfigService()
 
 
+def _api_base_looks_wrong_for_minimax(api_base: str) -> bool:
+    """
+    Mongo 里若把 MiniMax 模型的 api_base 填成 OpenAI/百炼等，请求会带着 sk-cp 打到错误域名，
+    对方常返回 401，界面误报「API Key 无效」。本地/反代保留 localhost。
+    """
+    if not api_base or not str(api_base).strip():
+        return False
+    lower = str(api_base).lower()
+    if "minimax.io" in lower or "minimaxi.com" in lower:
+        return False
+    if "localhost" in lower or "127.0.0.1" in lower:
+        return False
+    wrong = (
+        "api.openai.com",
+        "openai.azure",
+        "azure.com",
+        "dashscope",
+        "aliyuncs",
+        "deepseek.com",
+        "anthropic.com",
+        "open.bigmodel.cn",
+        "generativelanguage.googleapis.com",
+        "qianfan.baidubce.com",
+    )
+    return any(w in lower for w in wrong)
+
+
+def _normalize_minimax_provider_and_base(
+    model_name: str, provider: str, api_base: Optional[str]
+) -> Tuple[str, Optional[str]]:
+    """
+    MiniMax 官方模型名（MiniMax-*）强制走 custom_openai；
+    历史错误数据可能把 provider/api_base 写成 dashscope 或 OpenAI 等，此处纠正。
+    """
+    import os
+
+    if not isinstance(model_name, str) or not model_name.startswith("MiniMax-"):
+        return provider, api_base
+    p = "custom_openai"
+    base = (api_base or "").strip()
+    lower = base.lower()
+    need_replace = (
+        not base
+        or "dashscope" in lower
+        or "aliyuncs" in lower
+        or _api_base_looks_wrong_for_minimax(base)
+    )
+    if need_replace:
+        env_b = (
+            (os.getenv("CUSTOM_OPENAI_BASE_URL") or os.getenv("MINIMAX_BASE_URL") or "").strip().rstrip("/")
+        )
+        if base:
+            logger.warning(
+                "MiniMax 模型 %s 的 api_base 非 MiniMax 网关或为空（当前=%s），已改用 MINIMAX_BASE_URL / CUSTOM_OPENAI_BASE_URL 或按密钥推断默认网关",
+                model_name,
+                base[:80] + ("..." if len(base) > 80 else ""),
+            )
+        try:
+            from app.utils.api_key_utils import infer_default_minimax_openai_base_url
+
+            _def_base = infer_default_minimax_openai_base_url()
+        except ImportError:
+            _def_base = "https://api.minimax.io/v1"
+        base = env_b or _def_base
+    return p, base or None
+
+
+def _coerce_minimax_sk_cp_to_cn_gateway(
+    backend_url: Optional[str],
+    api_key: Optional[str],
+    model_name: str,
+    provider: str,
+) -> Optional[str]:
+    """
+    sk-cp- 多为中国区控制台密钥，应对 https://api.minimaxi.com/v1；
+    Mongo/UI 若填国际域 https://api.minimax.io/v1 会导致 MiniMax 返回 2049（DeerFlow 使用 .minimaxi.com）。
+    """
+    if not backend_url or not isinstance(model_name, str) or not model_name.startswith("MiniMax-"):
+        return backend_url
+    if str(provider).lower() != "custom_openai":
+        return backend_url
+    k = (api_key or "").strip()
+    if not k.startswith("sk-cp-"):
+        return backend_url
+    low = str(backend_url).lower()
+    if "api.minimax.io" in low and "minimaxi.com" not in low:
+        logger.warning(
+            "⚠️ [同步查询] MiniMax sk-cp- 密钥应走中国区网关 https://api.minimaxi.com/v1（与 DeerFlow 一致），"
+            "当前为 api.minimax.io，已自动纠正以免 2049"
+        )
+        return "https://api.minimaxi.com/v1"
+    return backend_url
+
+
 async def get_provider_by_model_name(model_name: str) -> str:
     """
     根据模型名称从数据库配置中查找对应的供应商（异步版本）
@@ -71,6 +165,9 @@ async def get_provider_by_model_name(model_name: str) -> str:
         for llm_config in system_config.llm_configs:
             if llm_config.model_name == model_name:
                 provider = llm_config.provider.value if hasattr(llm_config.provider, 'value') else str(llm_config.provider)
+                provider, _ = _normalize_minimax_provider_and_base(
+                    model_name, provider, getattr(llm_config, "api_base", None)
+                )
                 logger.info(f"✅ 从数据库找到模型 {model_name} 的供应商: {provider}")
                 return provider
 
@@ -125,32 +222,25 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
 
             for config_dict in llm_configs:
                 if config_dict.get("model_name") == model_name:
-                    provider = config_dict.get("provider")
-                    api_base = config_dict.get("api_base")
-                    model_api_key = config_dict.get("api_key")  # 🔥 获取模型配置的 API Key
+                    raw_provider = config_dict.get("provider")
+                    if hasattr(raw_provider, "value"):
+                        raw_provider = str(raw_provider.value)
+                    elif raw_provider is not None:
+                        raw_provider = str(raw_provider)
+                    else:
+                        raw_provider = ""
 
-                    # 从 llm_providers 集合中查找厂家配置
+                    api_base = config_dict.get("api_base")
+                    provider, api_base = _normalize_minimax_provider_and_base(model_name, raw_provider, api_base)
+                    # 从 llm_providers 集合中查找厂家配置（MiniMax 强制为 custom_openai 后需重新查厂家）
                     providers_collection = db.llm_providers
                     provider_doc = providers_collection.find_one({"name": provider})
 
-                    # 🔥 确定 API Key（优先级：模型配置 > 厂家配置 > 环境变量）
-                    api_key = None
-                    if model_api_key and model_api_key.strip() and model_api_key != "your-api-key":
-                        api_key = model_api_key
-                        logger.info(f"✅ [同步查询] 使用模型配置的 API Key")
-                    elif provider_doc and provider_doc.get("api_key"):
-                        provider_api_key = provider_doc["api_key"]
-                        if provider_api_key and provider_api_key.strip() and provider_api_key != "your-api-key":
-                            api_key = provider_api_key
-                            logger.info(f"✅ [同步查询] 使用厂家配置的 API Key")
+                    model_api_key = config_dict.get("api_key")  # 🔥 获取模型配置的 API Key
 
-                    # 如果数据库中没有有效的 API Key，尝试从环境变量获取
-                    if not api_key:
-                        api_key = _get_env_api_key_for_provider(provider)
-                        if api_key:
-                            logger.info(f"✅ [同步查询] 使用环境变量的 API Key")
-                        else:
-                            logger.warning(f"⚠️ [同步查询] 未找到 {provider} 的 API Key")
+                    api_key = _resolve_llm_api_key_for_model(
+                        model_name, provider, model_api_key, provider_doc
+                    )
 
                     # 确定 backend_url
                     backend_url = None
@@ -164,6 +254,7 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
                         backend_url = _get_default_backend_url(provider)
                         logger.warning(f"⚠️ [同步查询] 厂家 {provider} 没有配置 default_base_url，使用硬编码默认值")
 
+                    backend_url = _coerce_minimax_sk_cp_to_cn_gateway(backend_url, api_key, model_name, provider)
                     client.close()
                     return {
                         "provider": provider,
@@ -185,25 +276,14 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
             provider_doc = providers_collection.find_one({"name": provider})
 
             backend_url = _get_default_backend_url(provider)
-            api_key = None
 
-            if provider_doc:
-                if provider_doc.get("default_base_url"):
-                    backend_url = provider_doc["default_base_url"]
-                    logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 default_base_url: {backend_url}")
+            if provider_doc and provider_doc.get("default_base_url"):
+                backend_url = provider_doc["default_base_url"]
+                logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 default_base_url: {backend_url}")
 
-                if provider_doc.get("api_key"):
-                    provider_api_key = provider_doc["api_key"]
-                    if provider_api_key and provider_api_key.strip() and provider_api_key != "your-api-key":
-                        api_key = provider_api_key
-                        logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 API Key")
+            api_key = _resolve_llm_api_key_for_model(model_name, provider, None, provider_doc)
 
-            # 如果厂家配置中没有 API Key，尝试从环境变量获取
-            if not api_key:
-                api_key = _get_env_api_key_for_provider(provider)
-                if api_key:
-                    logger.info(f"✅ [同步查询] 使用环境变量的 API Key")
-
+            backend_url = _coerce_minimax_sk_cp_to_cn_gateway(backend_url, api_key, model_name, provider)
             client.close()
             return {
                 "provider": provider,
@@ -214,10 +294,12 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
             logger.warning(f"⚠️ [同步查询] 无法查询厂家配置: {e}")
 
         # 最后回退到硬编码的默认 URL 和环境变量 API Key
+        _bu = _get_default_backend_url(provider)
+        _ak = _resolve_llm_api_key_for_model(model_name, provider, None, None)
         return {
             "provider": provider,
-            "backend_url": _get_default_backend_url(provider),
-            "api_key": _get_env_api_key_for_provider(provider)
+            "backend_url": _coerce_minimax_sk_cp_to_cn_gateway(_bu, _ak, model_name, provider),
+            "api_key": _ak,
         }
 
     except Exception as e:
@@ -235,23 +317,14 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
             provider_doc = providers_collection.find_one({"name": provider})
 
             backend_url = _get_default_backend_url(provider)
-            api_key = None
 
-            if provider_doc:
-                if provider_doc.get("default_base_url"):
-                    backend_url = provider_doc["default_base_url"]
-                    logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 default_base_url: {backend_url}")
+            if provider_doc and provider_doc.get("default_base_url"):
+                backend_url = provider_doc["default_base_url"]
+                logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 default_base_url: {backend_url}")
 
-                if provider_doc.get("api_key"):
-                    provider_api_key = provider_doc["api_key"]
-                    if provider_api_key and provider_api_key.strip() and provider_api_key != "your-api-key":
-                        api_key = provider_api_key
-                        logger.info(f"✅ [同步查询] 使用厂家 {provider} 的 API Key")
+            api_key = _resolve_llm_api_key_for_model(model_name, provider, None, provider_doc)
 
-            # 如果厂家配置中没有 API Key，尝试从环境变量获取
-            if not api_key:
-                api_key = _get_env_api_key_for_provider(provider)
-
+            backend_url = _coerce_minimax_sk_cp_to_cn_gateway(backend_url, api_key, model_name, provider)
             client.close()
             return {
                 "provider": provider,
@@ -262,10 +335,12 @@ def get_provider_and_url_by_model_sync(model_name: str) -> dict:
             logger.warning(f"⚠️ [同步查询] 无法查询厂家配置: {e2}")
 
         # 最后回退到硬编码的默认 URL 和环境变量 API Key
+        _bu = _get_default_backend_url(provider)
+        _ak = _resolve_llm_api_key_for_model(model_name, provider, None, None)
         return {
             "provider": provider,
-            "backend_url": _get_default_backend_url(provider),
-            "api_key": _get_env_api_key_for_provider(provider)
+            "backend_url": _coerce_minimax_sk_cp_to_cn_gateway(_bu, _ak, model_name, provider),
+            "api_key": _ak,
         }
 
 
@@ -280,6 +355,19 @@ def _get_env_api_key_for_provider(provider: str) -> str:
         str: API Key，如果未找到则返回 None
     """
     import os
+
+    # custom_openai：MiniMax 场景下用户常配 MINIMAX_API_KEY；若仍保留 CUSTOM_OPENAI_API_KEY，
+    # 原先先读后者会导致正确密钥被忽略 → 401。优先 MINIMAX_API_KEY。
+    if provider.lower() == "custom_openai":
+        from app.utils.api_key_utils import normalize_secret_from_env
+
+        mk = normalize_secret_from_env(os.getenv("MINIMAX_API_KEY"))
+        if mk and mk != "your-api-key":
+            return mk
+        co = normalize_secret_from_env(os.getenv("CUSTOM_OPENAI_API_KEY"))
+        if co and co != "your-api-key":
+            return co
+        return None
 
     env_key_map = {
         "google": "GOOGLE_API_KEY",
@@ -296,9 +384,83 @@ def _get_env_api_key_for_provider(provider: str) -> str:
     env_key_name = env_key_map.get(provider.lower())
     if env_key_name:
         api_key = os.getenv(env_key_name)
-        if api_key and api_key.strip() and api_key != "your-api-key":
+        if api_key:
+            api_key = api_key.strip()
+        if api_key and api_key != "your-api-key":
             return api_key
 
+    return None
+
+
+def _resolve_llm_api_key_for_model(
+    model_name: str,
+    provider: str,
+    model_api_key: Optional[str],
+    provider_doc: Optional[dict],
+) -> Optional[str]:
+    """
+    合并模型 / 厂家 / 环境变量中的 API Key。
+    MiniMax（MiniMax-*）与 custom_openai：优先使用环境变量中有效密钥，
+    避免 Mongo 里残留占位符、截断或错误 key 覆盖 .env。
+    """
+    from app.utils.api_key_utils import is_valid_api_key
+
+    def pick(k: Optional[str]) -> Optional[str]:
+        if not k or not isinstance(k, str):
+            return None
+        s = k.strip()
+        if not s or s == "your-api-key":
+            return None
+        return s if is_valid_api_key(s) else None
+
+    env_raw = _get_env_api_key_for_provider(provider)
+    env_key = pick(env_raw)
+    mk = pick(model_api_key)
+    pk = pick(provider_doc.get("api_key")) if provider_doc else None
+
+    is_mm = isinstance(model_name, str) and model_name.startswith("MiniMax-")
+    is_custom = (provider or "").lower() == "custom_openai"
+
+    def _reject_minimax_jwt(k: Optional[str], label: str) -> Optional[str]:
+        """控制台登录 JWT 常以 ey 开头，通过 is_valid_api_key 但 MiniMax OpenAI 兼容不认 → 2049。"""
+        if not k:
+            return None
+        if k.lstrip().startswith("ey"):
+            logger.warning(
+                "⚠️ [同步查询] MiniMax/custom_openai：%s 以 ey 开头，疑似 JWT 而非接口 Secret Key，已忽略。"
+                "请到 MiniMax 控制台「接口密钥」复制 sk- 类密钥。",
+                label,
+            )
+            return None
+        return k
+
+    if is_mm or is_custom:
+        env_key = _reject_minimax_jwt(env_key, "环境变量密钥")
+        mk = _reject_minimax_jwt(mk, "模型配置 api_key")
+        pk = _reject_minimax_jwt(pk, "厂家配置 api_key")
+        if env_key:
+            logger.info(
+                "✅ [同步查询] MiniMax/custom_openai：使用环境变量 MINIMAX_API_KEY / CUSTOM_OPENAI_API_KEY"
+            )
+            return env_key
+        if mk:
+            logger.info("✅ [同步查询] 使用模型配置的 API Key")
+            return mk
+        if pk:
+            logger.info("✅ [同步查询] 使用厂家配置的 API Key")
+            return pk
+        logger.warning("⚠️ [同步查询] MiniMax/custom_openai：环境与数据库均无有效 API Key")
+        return None
+
+    if mk:
+        logger.info("✅ [同步查询] 使用模型配置的 API Key")
+        return mk
+    if pk:
+        logger.info("✅ [同步查询] 使用厂家配置的 API Key")
+        return pk
+    if env_key:
+        logger.info("✅ [同步查询] 使用环境变量的 API Key")
+        return env_key
     return None
 
 
@@ -312,6 +474,18 @@ def _get_default_backend_url(provider: str) -> str:
     Returns:
         str: 默认的 backend_url
     """
+    if str(provider).lower() == "custom_openai":
+        try:
+            from app.utils.api_key_utils import infer_default_minimax_openai_base_url
+
+            url = infer_default_minimax_openai_base_url()
+            logger.info(
+                f"🔧 [默认URL] {provider} -> {url}（MiniMax：sk-cp- 走 api.minimaxi.com，否则 api.minimax.io）"
+            )
+            return url
+        except ImportError:
+            pass
+
     default_urls = {
         "google": "https://generativelanguage.googleapis.com/v1beta",
         "dashscope": "https://dashscope.aliyuncs.com/api/v1",
@@ -321,6 +495,7 @@ def _get_default_backend_url(provider: str) -> str:
         "openrouter": "https://openrouter.ai/api/v1",
         "qianfan": "https://qianfan.baidubce.com/v2",
         "302ai": "https://api.302.ai/v1",
+        "custom_openai": "https://api.minimax.io/v1",
     }
 
     url = default_urls.get(provider, "https://dashscope.aliyuncs.com/compatible-mode/v1")
@@ -363,6 +538,9 @@ def _get_default_provider_by_model(model_name: str) -> str:
         'glm-3-turbo': 'zhipu',
         'chatglm3-6b': 'zhipu'
     }
+
+    if isinstance(model_name, str) and model_name.startswith("MiniMax-"):
+        return "custom_openai"
 
     provider = model_provider_map.get(model_name, 'dashscope')  # 默认使用阿里百炼
     logger.info(f"🔧 使用默认映射: {model_name} -> {provider}")
@@ -1018,23 +1196,21 @@ class SimpleAnalysisService:
             # 格式化错误信息为用户友好的提示
             from ..utils.error_formatter import ErrorFormatter
 
-            # 收集上下文信息
+            # 收集上下文信息（供 ErrorFormatter 识别厂商；字段名原为 quick_model 已废弃）
             error_context = {}
             if hasattr(request, 'parameters') and request.parameters:
-                if hasattr(request.parameters, 'quick_model'):
-                    error_context['model'] = request.parameters.quick_model
-                if hasattr(request.parameters, 'deep_model'):
-                    error_context['model'] = request.parameters.deep_model
+                p = request.parameters
+                if getattr(p, 'quick_analysis_model', None):
+                    error_context['llm_provider'] = get_provider_by_model_name_sync(p.quick_analysis_model)
+                if getattr(p, 'quick_model', None):
+                    error_context['model'] = p.quick_model
+                if getattr(p, 'deep_model', None):
+                    error_context['model'] = p.deep_model
 
             # 格式化错误
             formatted_error = ErrorFormatter.format_error(str(e), error_context)
 
-            # 构建用户友好的错误消息
-            user_friendly_error = (
-                f"{formatted_error['title']}\n\n"
-                f"{formatted_error['message']}\n\n"
-                f"💡 {formatted_error['suggestion']}"
-            )
+            user_friendly_error = ErrorFormatter.user_message_from_formatted(formatted_error)
 
             # 标记进度跟踪器失败
             if progress_tracker:
@@ -1828,20 +2004,18 @@ class SimpleAnalysisService:
             # 收集上下文信息
             error_context = {}
             if request and hasattr(request, 'parameters') and request.parameters:
-                if hasattr(request.parameters, 'quick_model'):
-                    error_context['model'] = request.parameters.quick_model
-                if hasattr(request.parameters, 'deep_model'):
-                    error_context['model'] = request.parameters.deep_model
+                p = request.parameters
+                if getattr(p, 'quick_analysis_model', None):
+                    error_context['llm_provider'] = get_provider_by_model_name_sync(p.quick_analysis_model)
+                if getattr(p, 'quick_model', None):
+                    error_context['model'] = p.quick_model
+                if getattr(p, 'deep_model', None):
+                    error_context['model'] = p.deep_model
 
             # 格式化错误
             formatted_error = ErrorFormatter.format_error(str(e), error_context)
 
-            # 构建用户友好的错误消息
-            user_friendly_error = (
-                f"{formatted_error['title']}\n\n"
-                f"{formatted_error['message']}\n\n"
-                f"💡 {formatted_error['suggestion']}"
-            )
+            user_friendly_error = ErrorFormatter.user_message_from_formatted(formatted_error)
 
             # 抛出包含友好错误信息的异常
             raise Exception(user_friendly_error) from e

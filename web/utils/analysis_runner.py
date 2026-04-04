@@ -17,8 +17,8 @@ logger = get_logger('web')
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-# 确保环境变量正确加载
-load_dotenv(project_root / ".env", override=True)
+# Docker 下 /app/.env 来自镜像模板，override=True 会覆盖 compose 注入的 MINIMAX_* / CUSTOM_OPENAI_*（常见 2049）
+load_dotenv(project_root / ".env", override=False)
 
 # 导入统一日志系统
 from tradingagents.utils.logging_init import setup_web_logging

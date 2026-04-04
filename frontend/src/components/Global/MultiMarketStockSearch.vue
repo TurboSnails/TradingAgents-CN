@@ -41,7 +41,7 @@
           <div class="stock-meta">
             <el-tag size="small" type="info">{{ getMarketLabel(stock.market) }}</el-tag>
             <el-tag v-if="stock.industry" size="small">{{ stock.industry }}</el-tag>
-            <span v-if="stock.pe" class="stock-pe">PE: {{ stock.pe.toFixed(2) }}</span>
+            <span v-if="stock.pe != null && stock.pe !== ''" class="stock-pe">PE: {{ toFixedSafe(stock.pe, 2) }}</span>
           </div>
         </div>
       </div>
@@ -59,6 +59,7 @@ import { Search, Loading } from '@element-plus/icons-vue'
 import { searchStocks, type StockInfo } from '@/api/multiMarket'
 import { ElMessage } from 'element-plus'
 import MarketSelector from './MarketSelector.vue'
+import { toFixedSafe } from '@/utils/formatNumber'
 
 interface Emits {
   (e: 'select', stock: StockInfo): void

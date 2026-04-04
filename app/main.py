@@ -229,6 +229,21 @@ async def lifespan(app: FastAPI):
 
     await init_db()
 
+    try:
+        from app.core.llm_catalog_bootstrap import ensure_custom_openai_minimax_catalog
+
+        await ensure_custom_openai_minimax_catalog()
+    except Exception as e:
+        logger.warning("LLM 目录补充（自定义 OpenAI / MiniMax）跳过: %s", e)
+
+    # 文档/测试使用的默认管理员（admin / admin123）：仅当库中尚无该用户时创建
+    try:
+        from app.services.user_service import user_service
+
+        await user_service.create_admin_user()
+    except Exception as e:
+        logger.warning("默认管理员初始化失败（可改用页面注册）: %s", e)
+
     #  配置桥接：将统一配置写入环境变量，供 TradingAgents 核心库使用
     try:
         from app.core.config_bridge import bridge_config_to_env

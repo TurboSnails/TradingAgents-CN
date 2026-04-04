@@ -8,6 +8,42 @@ import os
 from typing import Optional
 
 
+def normalize_secret_from_env(raw: Optional[str]) -> Optional[str]:
+    """
+    .env / Docker 常见写法 MINIMAX_API_KEY="sk-xxx" 或首尾空格；若不剥外层引号，鉴权会 401。
+    另：UTF-8 BOM（\\ufeff）或零宽字符会导致 MiniMax 等返回 401/invalid api key。
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    s = s.lstrip("\ufeff")
+    s = s.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    return s if s else None
+
+
+def infer_default_minimax_openai_base_url(explicit_api_key: Optional[str] = None) -> str:
+    """
+    MiniMax OpenAI 兼容网关：
+    - 国际常见：https://api.minimax.io/v1（platform.minimax.io 文档）
+    - 中国区常见：https://api.minimaxi.com/v1（platform.minimaxi.com；DeerFlow 等示例与 sk-cp- 密钥）
+
+    sk-cp- 前缀密钥多绑定中国区网关，误配 .io 时上游常返回 401 / invalid api key (2049)。
+    """
+    k = (explicit_api_key or "").strip()
+    if not k:
+        k = (
+            normalize_secret_from_env(os.getenv("MINIMAX_API_KEY"))
+            or normalize_secret_from_env(os.getenv("CUSTOM_OPENAI_API_KEY"))
+            or ""
+        )
+    k = (k or "").strip()
+    if k.startswith("sk-cp-"):
+        return "https://api.minimaxi.com/v1"
+    return "https://api.minimax.io/v1"
+
+
 def is_valid_api_key(api_key: Optional[str]) -> bool:
     """
     判断 API Key 是否有效

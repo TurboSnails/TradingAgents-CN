@@ -38,6 +38,7 @@ class ErrorFormatter:
         "qianfan": "百度千帆",
         "deepseek": "DeepSeek",
         "openai": "OpenAI",
+        "custom_openai": "MiniMax / 自定义 OpenAI 兼容",
         "openrouter": "OpenRouter",
         "anthropic": "Anthropic Claude",
         "zhipu": "智谱AI",
@@ -78,6 +79,42 @@ class ErrorFormatter:
         
         # 生成友好提示
         return cls._generate_friendly_message(category, provider_or_source, error_message, context)
+
+    _USER_TECH_MARKER = "--- 技术细节（便于排错）---"
+
+    @classmethod
+    def _deepest_technical_detail(cls, td: str) -> str:
+        """
+        异常链上若先 format 再 raise Exception(友好文案)，外层再次 format_error 时
+        technical_detail 会嵌套多段「技术细节」。循环剥到最内层（通常为 Error code: 401 / request_id）。
+        """
+        if not td:
+            return td
+        m = cls._USER_TECH_MARKER
+        while m in td:
+            td = td.split(m)[-1].strip()
+        # 若仍夹带大段友好标题，优先保留 OpenAI/MiniMax 原始错误行
+        if "Error code:" in td:
+            idx = td.rfind("Error code:")
+            if idx > 0 and len(td) - idx < len(td) * 0.9:
+                td = td[idx:].strip()
+        return td
+
+    @classmethod
+    def user_message_from_formatted(cls, formatted: Dict[str, str]) -> str:
+        """任务/接口展示用：含技术细节，便于核对上游原始报错（如 MiniMax 2049）。"""
+        base = (
+            f"{formatted['title']}\n\n"
+            f"{formatted['message']}\n\n"
+            f"💡 {formatted['suggestion']}"
+        )
+        td = cls._deepest_technical_detail((formatted.get("technical_detail") or "").strip())
+        if not td:
+            return base
+        limit = 6000
+        if len(td) > limit:
+            td = td[:limit] + "…(已截断)"
+        return f"{base}\n\n{cls._USER_TECH_MARKER}\n{td}"
     
     @classmethod
     def _categorize_error(cls, error_message: str, context: Dict) -> Tuple[ErrorCategory, Optional[str]]:
@@ -96,11 +133,20 @@ class ErrorFormatter:
             "api key", "api_key", "apikey", "invalid_api_key", "authentication", 
             "unauthorized", "401", "403", "gemini", "openai", "dashscope", "qianfan"
         ]):
-            # LLM API Key 错误
+            # LLM API Key 错误（不要用裸关键字 invalid，避免 "invalid model" 等误报为 Key 问题）
             if any(keyword in error_lower for keyword in [
-                "api key", "api_key", "apikey", "invalid", "authentication", 
-                "unauthorized", "401", "invalid_api_key", "api key not valid"
+                "api key", "api_key", "apikey", "authentication",
+                "unauthorized", "401", "invalid_api_key", "api key not valid",
+                "invalid api key", "authorized_error", "2049",
             ]):
+                return ErrorCategory.LLM_API_KEY, llm_provider
+            if "invalid" in error_lower and any(
+                kw in error_lower
+                for kw in (
+                    "credential", "token", "secret", "apikey", "api_key",
+                    "key id", "bearer",
+                )
+            ):
                 return ErrorCategory.LLM_API_KEY, llm_provider
             
             # LLM 配额/限流错误
@@ -176,9 +222,9 @@ class ErrorFormatter:
     
     @classmethod
     def _extract_llm_provider(cls, error_message: str) -> Optional[str]:
-        """从错误信息中提取 LLM 厂商"""
+        """从错误信息中提取 LLM 厂商（长 key 优先，避免 "openai" 误匹配 "custom_openai"）"""
         error_lower = error_message.lower()
-        for key, name in cls.LLM_PROVIDERS.items():
+        for key, name in sorted(cls.LLM_PROVIDERS.items(), key=lambda kv: -len(kv[0])):
             if key in error_lower or name.lower() in error_lower:
                 return key
         return None

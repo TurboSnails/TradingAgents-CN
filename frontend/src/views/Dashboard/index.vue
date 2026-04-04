@@ -319,6 +319,7 @@ import { favoritesApi } from '@/api/favorites'
 import { analysisApi } from '@/api/analysis'
 import { newsApi } from '@/api/news'
 import { paperApi, type PaperAccountSummary } from '@/api/paper'
+import { formatMoneySafe } from '@/utils/formatNumber'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -569,10 +570,8 @@ const goToPaperTrading = () => {
   router.push('/paper')
 }
 
-// 格式化金额
-const formatMoney = (value: number) => {
-  return value.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-}
+// 格式化金额（接口可能返回字符串，不能直接 .toFixed）
+const formatMoney = formatMoneySafe
 
 // 获取盈亏样式类
 const getPnlClass = (pnl: number) => {

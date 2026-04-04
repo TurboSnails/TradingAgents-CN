@@ -259,15 +259,15 @@
 
         <el-table-column prop="close" label="当前价格" width="100" align="right">
           <template #default="{ row }">
-            <span v-if="row.close">¥{{ row.close?.toFixed(2) }}</span>
+            <span v-if="row.close != null && row.close !== ''">¥{{ toFixedSafe(row.close, 2) }}</span>
             <span v-else class="text-gray-400">-</span>
           </template>
         </el-table-column>
 
         <el-table-column prop="pct_chg" label="涨跌幅" width="100" align="right">
           <template #default="{ row }">
-            <span v-if="row.pct_chg !== null && row.pct_chg !== undefined" :class="getChangeClass(row.pct_chg)">
-              {{ row.pct_chg > 0 ? '+' : '' }}{{ row.pct_chg?.toFixed(2) }}%
+            <span v-if="row.pct_chg !== null && row.pct_chg !== undefined" :class="getChangeClass(Number(row.pct_chg))">
+              {{ Number(row.pct_chg) > 0 ? '+' : '' }}{{ toFixedSafe(row.pct_chg, 2) }}%
             </span>
             <span v-else class="text-gray-400">-</span>
           </template>
@@ -281,8 +281,8 @@
 
         <el-table-column prop="pe" label="市盈率" width="130" align="right">
           <template #default="{ row }">
-            <span v-if="row.pe">
-              {{ row.pe?.toFixed(2) }}
+            <span v-if="row.pe != null && row.pe !== ''">
+              {{ toFixedSafe(row.pe, 2) }}
               <el-tag v-if="row.pe_is_realtime" type="success" size="small" style="margin-left: 4px">实时</el-tag>
             </span>
             <span v-else class="text-gray-400">-</span>
@@ -291,8 +291,8 @@
 
         <el-table-column prop="pb" label="市净率" width="130" align="right">
           <template #default="{ row }">
-            <span v-if="row.pb">
-              {{ row.pb?.toFixed(2) }}
+            <span v-if="row.pb != null && row.pb !== ''">
+              {{ toFixedSafe(row.pb, 2) }}
               <el-tag v-if="row.pe_is_realtime" type="success" size="small" style="margin-left: 4px">实时</el-tag>
             </span>
             <span v-else class="text-gray-400">-</span>
@@ -300,7 +300,7 @@
         </el-table-column>
         <el-table-column prop="roe" label="ROE(%)" width="110" align="right">
           <template #default="{ row }">
-            <span v-if="row.roe !== null && row.roe !== undefined">{{ row.roe?.toFixed(2) }}%</span>
+            <span v-if="row.roe !== null && row.roe !== undefined">{{ toFixedSafe(row.roe, 2) }}%</span>
             <span v-else class="text-gray-400">-</span>
           </template>
         </el-table-column>
@@ -367,6 +367,7 @@ import { screeningApi, type FieldConfigResponse, type FieldInfo } from '@/api/sc
 import { favoritesApi } from '@/api/favorites'
 import { getCurrentDataSource } from '@/api/sync'
 import { normalizeMarketForAnalysis, exchangeCodeToMarket, getMarketByStockCode } from '@/utils/market'
+import { toFixedSafe } from '@/utils/formatNumber'
 
 // 响应式数据
 const screeningLoading = ref(false)
@@ -686,12 +687,13 @@ const getChangeClass = (changePercent: number) => {
   return ''
 }
 
-const formatMarketCap = (marketCap: number) => {
-  if (marketCap >= 10000) {
-    return `${(marketCap / 10000).toFixed(2)}万亿`
-  } else {
-    return `${marketCap.toFixed(2)}亿`
+const formatMarketCap = (marketCap: unknown) => {
+  const n = Number(marketCap)
+  if (!Number.isFinite(n)) return '-'
+  if (n >= 10000) {
+    return `${(n / 10000).toFixed(2)}万亿`
   }
+  return `${n.toFixed(2)}亿`
 }
 
 const handleSizeChange = (size: number) => {

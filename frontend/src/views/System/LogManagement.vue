@@ -63,7 +63,7 @@
         </el-table-column>
         <el-table-column prop="size_mb" label="大小 (MB)" width="120" sortable>
           <template #default="{ row }">
-            {{ row.size_mb.toFixed(2) }}
+            {{ toFixedSafe(row.size_mb, 2) }}
           </template>
         </el-table-column>
         <el-table-column prop="modified_at" label="修改时间" width="180" sortable>
@@ -198,6 +198,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Download, Search, View, Delete } from '@element-plus/icons-vue'
 import { LogsApi, type LogFileInfo, type LogContentResponse, type LogStatistics } from '@/api/logs'
+import { toFixedSafe } from '@/utils/formatNumber'
 
 // 数据
 const loading = ref(false)
