@@ -27,7 +27,9 @@ from app.models.operation_log import ActionType
 from app.services.config_provider import provider as config_provider
 from app.core.llm_catalog_bootstrap import (
     env_has_custom_openai_compatible_key,
+    env_has_google_api_key,
     build_synthetic_minimax_llm_configs,
+    build_synthetic_google_llm_configs,
 )
 
 
@@ -955,6 +957,8 @@ async def get_llm_configs(
         # 环境变量已配 CUSTOM_OPENAI / MINIMAX 时，视为 custom_openai 可用（不依赖 Mongo 是否种子）
         if env_has_custom_openai_compatible_key():
             active_provider_names.add("custom_openai")
+        if env_has_google_api_key():
+            active_provider_names.add("google")
 
         def _prov_str(p) -> str:
             if p is None:
@@ -973,6 +977,14 @@ async def get_llm_configs(
         if env_has_custom_openai_compatible_key():
             existing_keys = {(_prov_str(c.provider), c.model_name) for c in filtered_configs}
             for synth in build_synthetic_minimax_llm_configs():
+                k = (_prov_str(synth.provider), synth.model_name)
+                if k not in existing_keys:
+                    filtered_configs.append(synth)
+                    existing_keys.add(k)
+
+        if env_has_google_api_key():
+            existing_keys = {(_prov_str(c.provider), c.model_name) for c in filtered_configs}
+            for synth in build_synthetic_google_llm_configs():
                 k = (_prov_str(synth.provider), synth.model_name)
                 if k not in existing_keys:
                     filtered_configs.append(synth)

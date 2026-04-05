@@ -136,22 +136,34 @@ class GraphSetup:
             delete_nodes["fundamentals"] = create_msg_delete()
             tool_nodes["fundamentals"] = self.tool_nodes["fundamentals"]
 
+        debate_llm = (
+            self.deep_thinking_llm
+            if self.config.get("bull_bear_uses_deep_llm")
+            else self.quick_thinking_llm
+        )
+        trader_llm = (
+            self.deep_thinking_llm
+            if self.config.get("trader_uses_deep_llm")
+            else self.quick_thinking_llm
+        )
+        risk_debate_llm = (
+            self.deep_thinking_llm
+            if self.config.get("risk_debate_uses_deep_llm")
+            else self.quick_thinking_llm
+        )
+
         # Create researcher and manager nodes
-        bull_researcher_node = create_bull_researcher(
-            self.quick_thinking_llm, self.bull_memory
-        )
-        bear_researcher_node = create_bear_researcher(
-            self.quick_thinking_llm, self.bear_memory
-        )
+        bull_researcher_node = create_bull_researcher(debate_llm, self.bull_memory)
+        bear_researcher_node = create_bear_researcher(debate_llm, self.bear_memory)
         research_manager_node = create_research_manager(
             self.deep_thinking_llm, self.invest_judge_memory
         )
-        trader_node = create_trader(self.quick_thinking_llm, self.trader_memory)
+        trader_node = create_trader(trader_llm, self.trader_memory)
 
         # Create risk analysis nodes
-        risky_analyst = create_risky_debator(self.quick_thinking_llm)
-        neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
-        safe_analyst = create_safe_debator(self.quick_thinking_llm)
+        risky_analyst = create_risky_debator(risk_debate_llm)
+        neutral_analyst = create_neutral_debator(risk_debate_llm)
+        safe_analyst = create_safe_debator(risk_debate_llm)
         risk_manager_node = create_risk_manager(
             self.deep_thinking_llm, self.risk_manager_memory
         )

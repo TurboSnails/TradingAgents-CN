@@ -2413,6 +2413,15 @@ class USDataSourceManager:
                 result.append(code_name)
                 logger.debug(f"🔄 数据源名称映射: '{db_name}' → '{code_name}'")
 
+            # 库能连上但没有任何 us_stocks 启用项时，原先会返回 []，导致 yfinance/Finnhub 被误判为
+            # 「已在数据库中禁用」、priority_order 为空，美股基本面永远失败（见 get_fundamentals_openai）。
+            if not result:
+                logger.warning(
+                    "⚠️ [美股] datasource_groupings 无启用的 us_stocks 记录，"
+                    "回退默认启用 yfinance、alpha_vantage、finnhub（与读库异常时一致）"
+                )
+                return ["yfinance", "alpha_vantage", "finnhub"]
+
             return result
         except Exception as e:
             logger.warning(f"⚠️ 从数据库读取启用的数据源失败: {e}")

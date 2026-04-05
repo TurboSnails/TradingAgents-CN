@@ -322,6 +322,54 @@ DEFAULT_MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "description": "Gemini 2.5 Flash Lite，轻量预览版"
     },
 
+    # ==================== MiniMax（官方 OpenAI 兼容模型名）====================
+    # 与 llm_catalog_bootstrap 中 model_name 一致；用于 validate_model_pair 勿把用户选择替换成 Gemini
+    "MiniMax-M2.7": {
+        "capability_level": 4,
+        "suitable_roles": [ModelRole.BOTH],
+        "features": [
+            ModelFeature.TOOL_CALLING,
+            ModelFeature.LONG_CONTEXT,
+            ModelFeature.REASONING,
+        ],
+        "recommended_depths": ["标准", "深度", "全面"],
+        "performance_metrics": {"speed": 3, "cost": 3, "quality": 5},
+        "description": "MiniMax M2.7，深度推理与工具调用",
+    },
+    "MiniMax-M2.7-highspeed": {
+        "capability_level": 4,
+        "suitable_roles": [ModelRole.BOTH],
+        "features": [
+            ModelFeature.TOOL_CALLING,
+            ModelFeature.LONG_CONTEXT,
+            ModelFeature.REASONING,
+            ModelFeature.FAST_RESPONSE,
+        ],
+        "recommended_depths": ["标准", "深度", "全面"],
+        "performance_metrics": {"speed": 4, "cost": 3, "quality": 4},
+        "description": "MiniMax M2.7 高速版",
+    },
+    "MiniMax-M2.5": {
+        "capability_level": 3,
+        "suitable_roles": [ModelRole.BOTH],
+        "features": [
+            ModelFeature.TOOL_CALLING,
+            ModelFeature.LONG_CONTEXT,
+            ModelFeature.REASONING,
+        ],
+        "recommended_depths": ["基础", "标准", "深度"],
+        "performance_metrics": {"speed": 4, "cost": 4, "quality": 4},
+        "description": "MiniMax M2.5",
+    },
+    "MiniMax-M2": {
+        "capability_level": 3,
+        "suitable_roles": [ModelRole.BOTH],
+        "features": [ModelFeature.TOOL_CALLING, ModelFeature.LONG_CONTEXT],
+        "recommended_depths": ["快速", "基础", "标准"],
+        "performance_metrics": {"speed": 4, "cost": 4, "quality": 3},
+        "description": "MiniMax M2",
+    },
+
     # ==================== 月之暗面 (Moonshot) ====================
     "moonshot-v1-8k": {
         "capability_level": 2,

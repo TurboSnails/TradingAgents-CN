@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Union, Sequence
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import BaseTool
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
-from langchain_core.outputs import LLMResult
+from langchain_core.outputs import ChatResult
 from pydantic import Field, SecretStr
 from ..config.config_manager import token_tracker
 
@@ -156,26 +156,22 @@ class ChatGoogleOpenAI(ChatGoogleGenerativeAI):
             return model[7:]  # 移除 "models/" 前缀
         return model or "unknown"
     
-    def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs) -> LLMResult:
+    def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs) -> ChatResult:
         """重写生成方法，优化工具调用处理和内容格式"""
 
         try:
             # 调用父类的生成方法
             result = super()._generate(messages, stop, **kwargs)
 
-            # 优化返回内容格式
-            # 注意：result.generations 是二维列表 [[ChatGeneration]]
+            # 优化返回内容格式（ChatResult.generations 为 List[ChatGeneration]，兼容旧版嵌套列表）
             if result and result.generations:
-                for generation_list in result.generations:
-                    if isinstance(generation_list, list):
-                        for generation in generation_list:
-                            if hasattr(generation, 'message') and generation.message:
-                                # 优化消息内容格式
+                for item in result.generations:
+                    if isinstance(item, list):
+                        for generation in item:
+                            if hasattr(generation, "message") and generation.message:
                                 self._optimize_message_content(generation.message)
-                    else:
-                        # 兼容性处理：如果不是列表，直接处理
-                        if hasattr(generation_list, 'message') and generation_list.message:
-                            self._optimize_message_content(generation_list.message)
+                    elif hasattr(item, "message") and item.message:
+                        self._optimize_message_content(item.message)
 
             # 追踪 token 使用量
             self._track_token_usage(result, kwargs)
@@ -190,16 +186,25 @@ class ChatGoogleOpenAI(ChatGoogleGenerativeAI):
             error_str = str(e)
             if 'API_KEY_INVALID' in error_str or 'API key not valid' in error_str:
                 error_content = "Google AI API Key 无效或未配置。\n\n请检查：\n1. GOOGLE_API_KEY 环境变量是否正确配置\n2. API Key 是否有效（访问 https://ai.google.dev/ 获取）\n3. 是否启用了 Gemini API\n\n建议：使用其他 AI 模型（如阿里百炼、DeepSeek）"
+            elif "RESOURCE_EXHAUSTED" in error_str or (
+                "429" in error_str and ("gemini" in error_str.lower() or "google" in error_str.lower())
+            ) or "quota" in error_str.lower() and "generativelanguage" in error_str.lower():
+                # 勿用假 AIMessage 冒充模型输出；让任务失败并展示明确原因
+                raise RuntimeError(
+                    "Google Gemini 配额/限流（常见：免费层用尽，或 gemini-2.5-pro 在当前项目下限额为 0）。\n"
+                    "请到 https://ai.dev/rate-limit 查看用量；深度模型可改用 gemini-2.0-flash / gemini-1.5-flash；或升级计费。\n"
+                    f"上游摘要：{error_str[:1500]}"
+                ) from e
             elif 'Connection' in error_str or 'Network' in error_str:
                 error_content = f"Google AI 网络连接失败: {error_str}\n\n请检查：\n1. 网络连接是否正常\n2. 是否需要科学上网\n3. 防火墙设置"
             else:
                 error_content = f"Google AI 调用失败: {error_str}\n\n请检查配置或使用其他 AI 模型"
 
-            # 返回一个包含错误信息的结果，而不是抛出异常
+            # 返回 ChatResult，且 generations 为扁平列表（与 langchain_core ChatResult 一致），避免上游对 generations[0].message 时把 list 当 ChatGeneration
             from langchain_core.outputs import ChatGeneration
             error_message = AIMessage(content=error_content)
             error_generation = ChatGeneration(message=error_message)
-            return LLMResult(generations=[[error_generation]])
+            return ChatResult(generations=[error_generation])
     
     def _optimize_message_content(self, message: BaseMessage):
         """优化消息内容格式，确保包含新闻特征关键词"""
@@ -258,7 +263,7 @@ class ChatGoogleOpenAI(ChatGoogleGenerativeAI):
         
         return enhanced_content
     
-    def _track_token_usage(self, result: LLMResult, kwargs: Dict[str, Any]):
+    def _track_token_usage(self, result: ChatResult, kwargs: Dict[str, Any]):
         """追踪 token 使用量"""
         
         try:

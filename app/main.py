@@ -230,11 +230,15 @@ async def lifespan(app: FastAPI):
     await init_db()
 
     try:
-        from app.core.llm_catalog_bootstrap import ensure_custom_openai_minimax_catalog
+        from app.core.llm_catalog_bootstrap import (
+            ensure_custom_openai_minimax_catalog,
+            ensure_google_gemini_catalog,
+        )
 
         await ensure_custom_openai_minimax_catalog()
+        await ensure_google_gemini_catalog()
     except Exception as e:
-        logger.warning("LLM 目录补充（自定义 OpenAI / MiniMax）跳过: %s", e)
+        logger.warning("LLM 目录补充（自定义 OpenAI / MiniMax / Gemini）跳过: %s", e)
 
     # 文档/测试使用的默认管理员（admin / admin123）：仅当库中尚无该用户时创建
     try:

@@ -13,6 +13,11 @@ DEFAULT_CONFIG = {
     "deep_think_llm": "o4-mini",
     "quick_think_llm": "gpt-4o-mini",
     "backend_url": "https://api.openai.com/v1",
+    # 分层模型：在「快速 / 深度」双 LLM 已配置的前提下，指定哪些节点走深度模型（如深度=Gemini、快速=MiniMax）
+    # 环境变量可覆盖：TRADER_USES_DEEP_LLM、RISK_DEBATE_USES_DEEP_LLM、BULL_BEAR_USES_DEEP_LLM
+    "trader_uses_deep_llm": False,
+    "risk_debate_uses_deep_llm": False,
+    "bull_bear_uses_deep_llm": False,
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,

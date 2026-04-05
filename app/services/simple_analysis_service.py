@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import os
 import uuid
 import logging
 from datetime import datetime
@@ -32,6 +33,7 @@ from app.services.config_service import ConfigService
 from app.services.memory_state_manager import get_memory_state_manager, TaskStatus
 from app.services.redis_progress_tracker import RedisProgressTracker, get_progress_by_id
 from app.services.progress_log_handler import register_analysis_tracker, unregister_analysis_tracker
+from app.constants.model_capabilities import ModelFeature
 
 # 股票基础信息获取（用于补充显示名称）
 try:
@@ -547,6 +549,13 @@ def _get_default_provider_by_model(model_name: str) -> str:
     return provider
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def create_analysis_config(
     research_depth,  # 支持数字(1-5)或字符串("快速", "标准", "深度")
     selected_analysts: list,
@@ -555,7 +564,10 @@ def create_analysis_config(
     llm_provider: str,
     market_type: str = "A股",
     quick_model_config: dict = None,  # 新增：快速模型的完整配置
-    deep_model_config: dict = None    # 新增：深度模型的完整配置
+    deep_model_config: dict = None,    # 新增：深度模型的完整配置
+    trader_uses_deep_llm: Optional[bool] = None,
+    risk_debate_uses_deep_llm: Optional[bool] = None,
+    bull_bear_uses_deep_llm: Optional[bool] = None,
 ) -> dict:
     """
     创建分析配置 - 支持数字等级和中文等级
@@ -752,6 +764,23 @@ def create_analysis_config(
                    f"timeout={deep_model_config.get('timeout')}, "
                    f"retry_times={deep_model_config.get('retry_times')}")
 
+    # 分层路由：显式参数 > 环境变量 > DEFAULT_CONFIG 拷贝中的默认值
+    config["trader_uses_deep_llm"] = (
+        trader_uses_deep_llm
+        if trader_uses_deep_llm is not None
+        else _env_bool("TRADER_USES_DEEP_LLM", config.get("trader_uses_deep_llm", False))
+    )
+    config["risk_debate_uses_deep_llm"] = (
+        risk_debate_uses_deep_llm
+        if risk_debate_uses_deep_llm is not None
+        else _env_bool("RISK_DEBATE_USES_DEEP_LLM", config.get("risk_debate_uses_deep_llm", False))
+    )
+    config["bull_bear_uses_deep_llm"] = (
+        bull_bear_uses_deep_llm
+        if bull_bear_uses_deep_llm is not None
+        else _env_bool("BULL_BEAR_USES_DEEP_LLM", config.get("bull_bear_uses_deep_llm", False))
+    )
+
     logger.info(f"📋 ========== 创建分析配置完成 ==========")
     logger.info(f"   🎯 研究深度: {research_depth}")
     logger.info(f"   🔥 辩论轮次: {config['max_debate_rounds']}")
@@ -761,6 +790,12 @@ def create_analysis_config(
     logger.info(f"   🤖 LLM供应商: {llm_provider}")
     logger.info(f"   ⚡ 快速模型: {config['quick_think_llm']}")
     logger.info(f"   🧠 深度模型: {config['deep_think_llm']}")
+    logger.info(
+        f"   🪜 分层: Trader→{'深度' if config['trader_uses_deep_llm'] else '快速'}, "
+        f"多空研→{'深度' if config['bull_bear_uses_deep_llm'] else '快速'}, "
+        f"风险辩→{'深度' if config['risk_debate_uses_deep_llm'] else '快速'} "
+        f"（研管/风控判官始终深度）"
+    )
     logger.info(f"📋 ========================================")
 
     return config
@@ -1196,16 +1231,26 @@ class SimpleAnalysisService:
             # 格式化错误信息为用户友好的提示
             from ..utils.error_formatter import ErrorFormatter
 
-            # 收集上下文信息（供 ErrorFormatter 识别厂商；字段名原为 quick_model 已废弃）
+            # 收集上下文信息（供 ErrorFormatter 识别厂商；Gemini/配额类错误按深度模型归因）
             error_context = {}
             if hasattr(request, 'parameters') and request.parameters:
                 p = request.parameters
-                if getattr(p, 'quick_analysis_model', None):
-                    error_context['llm_provider'] = get_provider_by_model_name_sync(p.quick_analysis_model)
-                if getattr(p, 'quick_model', None):
-                    error_context['model'] = p.quick_model
-                if getattr(p, 'deep_model', None):
-                    error_context['model'] = p.deep_model
+                err_txt = str(e)
+                err_l = err_txt.lower()
+                google_like = (
+                    "gemini" in err_l
+                    or "generativelanguage" in err_l
+                    or "resource_exhausted" in err_l
+                    or "ai.google.dev" in err_l
+                )
+                if google_like and getattr(p, "deep_analysis_model", None):
+                    error_context["llm_provider"] = get_provider_by_model_name_sync(p.deep_analysis_model)
+                elif getattr(p, "quick_analysis_model", None):
+                    error_context["llm_provider"] = get_provider_by_model_name_sync(p.quick_analysis_model)
+                if getattr(p, "quick_model", None):
+                    error_context["model"] = p.quick_model
+                if getattr(p, "deep_model", None):
+                    error_context["model"] = p.deep_model
 
             # 格式化错误
             formatted_error = ErrorFormatter.format_error(str(e), error_context)
@@ -1361,16 +1406,22 @@ class SimpleAnalysisService:
                 )
 
                 if not validation["valid"]:
-                    # 记录警告
                     for warning in validation["warnings"]:
                         logger.warning(warning)
-
-                    # 如果模型不合适，自动切换到推荐模型
-                    logger.info(f"🔄 自动切换到推荐模型...")
-                    quick_model, deep_model = capability_service.recommend_models_for_depth(
-                        research_depth
-                    )
-                    logger.info(f"✅ 已切换: quick={quick_model}, deep={deep_model}")
+                    # 用户已在界面显式选模：仅「快速模型不支持工具调用」时强制换模，避免能力等级校验把整对换成 Gemini 等
+                    _qc = capability_service.get_model_config(quick_model)
+                    _no_tools = ModelFeature.TOOL_CALLING not in _qc.get("features", [])
+                    if _no_tools:
+                        logger.info("🔄 快速模型不支持工具调用，自动切换到推荐模型...")
+                        quick_model, deep_model = capability_service.recommend_models_for_depth(
+                            research_depth
+                        )
+                        logger.info(f"✅ 已切换: quick={quick_model}, deep={deep_model}")
+                    else:
+                        logger.warning(
+                            "⚠️ 模型组合未完全满足「%s」分析建议，已保留界面选择的 quick/deep，不再自动替换",
+                            research_depth,
+                        )
                 else:
                     # 即使验证通过，也记录警告信息
                     for warning in validation["warnings"]:
@@ -2001,16 +2052,26 @@ class SimpleAnalysisService:
             # 格式化错误信息为用户友好的提示
             from ..utils.error_formatter import ErrorFormatter
 
-            # 收集上下文信息
+            # 收集上下文信息（Gemini/配额按深度模型归因，避免误标为 MiniMax）
             error_context = {}
             if request and hasattr(request, 'parameters') and request.parameters:
                 p = request.parameters
-                if getattr(p, 'quick_analysis_model', None):
-                    error_context['llm_provider'] = get_provider_by_model_name_sync(p.quick_analysis_model)
-                if getattr(p, 'quick_model', None):
-                    error_context['model'] = p.quick_model
-                if getattr(p, 'deep_model', None):
-                    error_context['model'] = p.deep_model
+                err_txt = str(e)
+                err_l = err_txt.lower()
+                google_like = (
+                    "gemini" in err_l
+                    or "generativelanguage" in err_l
+                    or "resource_exhausted" in err_l
+                    or "ai.google.dev" in err_l
+                )
+                if google_like and getattr(p, "deep_analysis_model", None):
+                    error_context["llm_provider"] = get_provider_by_model_name_sync(p.deep_analysis_model)
+                elif getattr(p, "quick_analysis_model", None):
+                    error_context["llm_provider"] = get_provider_by_model_name_sync(p.quick_analysis_model)
+                if getattr(p, "quick_model", None):
+                    error_context["model"] = p.quick_model
+                if getattr(p, "deep_model", None):
+                    error_context["model"] = p.deep_model
 
             # 格式化错误
             formatted_error = ErrorFormatter.format_error(str(e), error_context)
